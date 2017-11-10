@@ -261,8 +261,9 @@ def run(ctx,
     if not broker and end is None:
         ctx.fail("must specify an end date with '-e' / '--end'")
 
-    if broker and broker_uri is None:
-        ctx.fail("must specify broker-uri if broker is specified")
+    if str(broker) != 'robinhood':
+        if broker and broker_uri is None:
+            ctx.fail("must specify broker-uri if broker is specified")
 
     if broker and state_file is None:
         ctx.fail("must specify state-file with live trading")
@@ -284,7 +285,11 @@ def run(ctx,
         except AttributeError:
             ctx.fail("unsupported broker: can't import class %s from %s" %
                      (cl_name, mod_name))
-        brokerobj = bclass(broker_uri)
+
+        if str(broker) != 'robinhood':
+            brokerobj = bclass(broker_uri)
+        else:
+            brokerobj = bclass()
 
     if (algotext is not None) == (algofile is not None):
         ctx.fail(
@@ -315,6 +320,8 @@ def run(ctx,
         state_filename=state_file,
         realtime_bar_target=realtime_bar_target
     )
+
+    print("perf finished")
 
     if output == '-':
         click.echo(str(perf))
