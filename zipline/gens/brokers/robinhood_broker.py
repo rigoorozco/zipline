@@ -34,7 +34,7 @@ from zipline.api import symbol as symbol_lookup
 from zipline.errors import SymbolNotFound
 
 from Robinhood import Robinhood
-from pyEX import api
+from pyEX import api as iex
 from threading import Thread
 from time import sleep
 
@@ -136,23 +136,12 @@ class RHConnection():
                                                                    ticker_id))
             return
 
-        # RT Volume Bar. Format:
-        # Last trade price; Last trade size;Last trade time;Total volume;\
-        # VWAP;Single trade flag
-        # e.g.: 701.28;1;1348075471534;67854;701.46918464;true
-        
-        last_trade_price = api.get_lastSalePrice(symbol)
-        last_trade_size = api.get_lastSaleSize(symbol)
-        last_trade_time = api.get_lastSaleTime(symbol)
-        total_volume = api.get_volume(symbol)
-        vwap = api.chart(symbol, '1m')[-1]['vwap']
+        last_trade_price = iex.get_lastSalePrice(symbol)
+        last_trade_size = iex.get_lastSaleSize(symbol)
+        last_trade_time = iex.get_lastSaleTime(symbol)
+        total_volume = iex.get_volume(symbol)
+        vwap = iex.chart(symbol, '1m')[-1]['vwap']
         single_trade_flag = False
-
-        # Ignore this update if last_trade_price is empty:
-        # tickString: tickerId=0 tickType=48/RTVolume ;0;1469805548873;\
-        # 240304;216.648653;true
-        # if len(last_trade_price) == 0:
-        #     return
 
         last_trade_dt = pd.to_datetime(float(last_trade_time), unit='ms', utc=True)
 
@@ -228,11 +217,11 @@ class ROBINHOODBroker(Broker):
         z_portfolio = zp.Portfolio()
         z_portfolio.capital_used = None
         z_portfolio.starting_cash = None
-        z_portfolio.portfolio_value = _rh.trader.portfolios()['equity']
+        z_portfolio.portfolio_value = self._rh.trader.portfolios()['equity']
         z_portfolio.pnl = None
         z_portfolio.returns = None # pnl / total_at_start
-        z_portfolio.cash = _rh.trader.get_account()['margin_balances']['unallocated_margin_cash']
-        z_portfolio.start_date = _rh.trader.portfolios()['start_date']
+        z_portfolio.cash = self._rh.trader.get_account()['margin_balances']['unallocated_margin_cash']
+        z_portfolio.start_date = self._rh.trader.portfolios()['start_date']
         z_portfolio.positions = self.positions()
         z_portfolio.positions_value = None
         z_portfolio.positions_exposure = None
@@ -248,8 +237,8 @@ class ROBINHOODBroker(Broker):
 
         z_account.settled_cash = None
         z_account.accrued_interest = None
-        z_account.buying_power = _rh.trader.get_account()['margin_balances']['unallocated_margin_cash']
-        z_account.equity_with_loan = _rh.trader.portfolios()['equity']
+        z_account.buying_power = self._rh.trader.get_account()['margin_balances']['unallocated_margin_cash']
+        z_account.equity_with_loan = self._rh.trader.portfolios()['equity']
         z_account.total_positions_value = None
         z_account.total_positions_exposure = None
         z_account.regt_equity = None
@@ -282,25 +271,38 @@ class ROBINHOODBroker(Broker):
             stop=style.get_stop_price(is_buy),
             limit=style.get_limit_price(is_buy))
 
-        # TODO(RIGO)
-
         abs_amount = int(fabs(amount))
         transaction = "buy" if amount > 0 else "sell"
 
-        if isinstance(style, MarketOrder):
-            _rh.trader.place_market_order(stock_instrument, abs_amount, transaction)
-        elif isinstance(style, LimitOrder):
-            _rh.trader.place_limit_order(stock_instrument, abs_amount, limit_price, transaction)
-        elif isinstance(style, StopOrder):
-            _rh.trader.place_stop_loss_orders(stock_instrument, abs_amount, stop_price, transaction)
-        elif isinstance(style, StopLimitOrder):
-            _rh.trader.place_stop_limit_order(stock_instrument, abs_amount, limit_price, stop_price, transaction)
+        stock_instrument = self._rh.trader.instruments(str(asset.symbol))[0]
 
-        robinhood_order_id = self._rh.next_order_id
+        if isinstance(style, MarketOrder):
+            robinhood_order_id = self._rh.trader.place_market_order(stock_instrument, abs_amount, transaction)
+        elif isinstance(style, LimitOrder):
+            robinhood_order_id = self._rh.trader.place_limit_order(stock_instrument, abs_amount, limit_price, transaction)
+        elif isinstance(style, StopOrder):
+            robinhood_order_id = self._rh.trader.place_stop_loss_orders(stock_instrument, abs_amount, stop_price, transaction)
+        elif isinstance(style, StopLimitOrder):
+            robinhood_order_id = self._rh.trader.place_stop_limit_order(stock_instrument, abs_amount, limit_price, stop_price, transaction)
+
         zp_order.broker_order_id = robinhood_order_id
         self.orders[zp_order.id] = zp_order
 
         return zp_order.id
+
+    def update_open_orders(self):
+        open_orders = self._rh.trader.list_open_orders()
+
+        for order_id, order in open_orders.items():
+            zp_order = ZPOrder(
+                dt=order['dt'],
+                asset=symbol_lookup(order['asset']),
+                amount=order['amount'],
+                stop=order['stop_price'],
+                limit=order['limit_price'])
+
+            zp_order.broker_order_id = order_id
+            self.orders[zp_order.id] = zp_order
 
     # Required - called in algorithm_live.py
     def get_open_orders(self, asset):
@@ -322,11 +324,8 @@ class ROBINHOODBroker(Broker):
     # Required - called in algorithm_live.py
     def cancel_order(self, zp_order_id):
         robinhood_order_id = self.orders[zp_order_id].broker_order_id
-        # ZPOrder cancellation will be done indirectly through _order_update
-
-        # TODO(RIGO)
-
-        # self._rh.cancelOrder(robinhood_order_id)
+        
+        self._rh.trader.cancel_order(robinhood_order_id)
 
     # Required - called in data_portal_live.py
     def get_spot_value(self, assets, field, dt, data_frequency):
@@ -382,7 +381,7 @@ class ROBINHOODBroker(Broker):
             raise ValueError("Invalid frequency specified: %s" % frequency)
 
         df = pd.DataFrame()
-        for asset in assets():
+        for asset in assets:
             symbol = str(asset.symbol)
             self.subscribe_to_market_data(asset)
 
