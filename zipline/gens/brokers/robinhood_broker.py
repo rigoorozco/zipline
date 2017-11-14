@@ -483,11 +483,11 @@ class ROBINHOODBroker(Broker):
         if isinstance(style, MarketOrder):
             robinhood_order_id = self._rh.trader.place_market_order(stock_instrument, abs_amount, transaction)
         elif isinstance(style, LimitOrder):
-            robinhood_order_id = self._rh.trader.place_limit_order(stock_instrument, abs_amount, limit_price, transaction)
+            robinhood_order_id = self._rh.trader.place_limit_order(stock_instrument, abs_amount, style.limit_price, transaction)
         elif isinstance(style, StopOrder):
-            robinhood_order_id = self._rh.trader.place_stop_loss_orders(stock_instrument, abs_amount, stop_price, transaction)
+            robinhood_order_id = self._rh.trader.place_stop_loss_orders(stock_instrument, abs_amount, style.stop_price, transaction)
         elif isinstance(style, StopLimitOrder):
-            robinhood_order_id = self._rh.trader.place_stop_limit_order(stock_instrument, abs_amount, limit_price, stop_price, transaction)
+            robinhood_order_id = self._rh.trader.place_stop_limit_order(stock_instrument, abs_amount, style.limit_price, style.stop_price, transaction)
 
         zp_order.broker_order_id = robinhood_order_id
         self.orders[zp_order.id] = zp_order
