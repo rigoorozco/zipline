@@ -14,6 +14,8 @@ from .core import (
 )
 from .yahoo import yahoo_equities
 
+from . import google
+
 
 __all__ = [
     'UnknownBundle',

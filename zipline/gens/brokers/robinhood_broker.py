@@ -16,7 +16,7 @@ from collections import namedtuple, defaultdict
 from time import sleep
 from math import fabs
 
-import datetime as dt
+from datetime import datetime, timedelta
 
 from six import itervalues
 import pandas as pd
@@ -37,6 +37,7 @@ from Robinhood import Robinhood
 from pyEX import api as iex
 from threading import Thread
 from time import sleep
+import calendar
 
 from logbook import Logger
 
@@ -44,11 +45,6 @@ if sys.version_info > (3,):
     long = int
 
 log = Logger('Robinhood Broker')
-
-Position = namedtuple('Position', ['position', 'market_price',
-                                   'market_value', 'average_cost',
-                                   'unrealized_pnl', 'realized_pnl',
-                                   'account_name'])
 
 
 def log_message(message, mapping):
@@ -62,6 +58,7 @@ def log_message(message, mapping):
     for k, v in items:
         log.debug(('    %s:%s' % (k, v)))
 
+
 def threaded(fn):
     def wrapper(*args, **kwargs):
         thread = Thread(target=fn, args=args, kwargs=kwargs)
@@ -69,25 +66,109 @@ def threaded(fn):
         return thread
     return wrapper
 
+
+def utc_to_local(utc_dt):
+    # get integer timestamp to avoid precision lost
+    timestamp = calendar.timegm(utc_dt.timetuple())
+    local_dt = datetime.fromtimestamp(timestamp)
+    assert utc_dt.resolution >= timedelta(microseconds=1)
+    return local_dt.replace(microsecond=utc_dt.microsecond)
+
+
+class Security:
+    def __init__(self, symbol, simple_name, min_tick_size=None, is_tradeable=False, security_type=None, security_detail=None):
+        self.symbol = symbol
+        self.simple_name = simple_name
+        self.min_tick_size = min_tick_size
+        self.is_tradeable = is_tradeable
+        self.security_type = security_type
+        self.security_detail = {}  # this the raw hash
+        if security_detail:
+            self.security_detail = security_detail
+
+    def price_convert_up_by_tick_size(self, price):
+        if not self.min_tick_size or self.min_tick_size == 0.0:
+            return price
+
+        return round(np.math.ceil(price / self.min_tick_size) * self.min_tick_size, 7)
+
+    def price_convert_down_by_tick_size(self, price):
+        if not self.min_tick_size or self.min_tick_size == 0.0:
+            return price
+
+        return round(np.math.floor(price / self.min_tick_size) * self.min_tick_size, 7)
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
+class Position:
+    def __init__(self, amount=0, cost_basis=0, last_sale_price=0, created=None):
+        self.amount = amount
+        self.cost_basis = cost_basis
+        self.last_sale_price = last_sale_price
+        self.created = created
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
+class Portfolio:
+    def __init__(self):
+        self.capital_used = 0
+        self.cash = 0
+        self.pnl = 0
+        self.positions = {}
+        self.portfolio_value = 0
+        self.positions_value = 0
+        self.returns = 0
+        self.starting_cash = 0
+        self.start_date = None
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
+class Account:
+    def __init__(self):
+        self.accrued_interest = 0
+        self.available_funds = 0
+        self.buying_power = 0
+        self.cushion = 0
+        self.day_trades_remaining = 0
+        self.equity_with_loan = 0
+        self.excess_liquidity = 0
+        self.initial_margin_requirement = 0
+        self.leverage = 0
+        self.maintenance_margin_requirement = 0
+        self.net_leverage = 0
+        self.net_liquidation = 0
+        self.settled_cash = 0
+        self.total_positions_value = 0
+
+    def __str__(self):
+        return str(self.__dict__)
+
+
 class RHConnection():
     def __init__(self):
         self._next_ticker_id = 0
         self._next_order_id = None
-        self.managed_accounts = None
+
         self.symbol_to_ticker_id = {}
         self.ticker_id_to_symbol = {}
-        self.last_tick = defaultdict(dict)
         self.bars = {}
-        # accounts structure: accounts[account_id][currency][value]
-        self.accounts = defaultdict(
-            lambda: defaultdict(lambda: defaultdict(lambda: np.NaN)))
-        self.accounts_download_complete = False
-        self.positions = {}
-        self.portfolio = {}
-        self.orders = {}
+
         self.time_skew = None
 
         self.trader = None
+
+        self.account = None
+        self.portfolio = None
+
+        self._fetched_securities_cache = {}
+        self._starting_cash = None
+        self._start_date = datetime.now()
 
         self.connect()
         self.process_tickers()
@@ -96,7 +177,7 @@ class RHConnection():
        # Connect to Robinhood here
        self.trader = Robinhood()
        self.trader.login_prompt()
-
+       self.load_profile_info()
        log.info("Local-Broker Time Skew: {}".format(self.time_skew))
 
     @property
@@ -163,25 +244,152 @@ class RHConnection():
         else:
             self.bars[symbol] = self.bars[symbol].append(bar)
 
+    def load_profile_info(self):
+        pos_infos = self.trader.positions()
+        port_info = self.trader.portfolios()
+        acct_info = self.trader.get_account()
+        # log.info("pos_infos:%s" % pos_infos)
+        # log.info("account_info:%s" % acct_info)
+        # log.info("port_info:%s" % port_info)
+
+        unsettled_funds = float(acct_info["unsettled_funds"])
+        market_value = float(port_info["market_value"])
+        equity = float(port_info["equity"])
+        yesterday_equity = float(port_info["equity_previous_close"])
+        uncleared_deposits = float(acct_info["uncleared_deposits"])
+        cash_held_for_orders = float(acct_info["cash_held_for_orders"])
+        cash = float(acct_info["cash"])
+        total_cash = cash + unsettled_funds
+        portfolio_value = equity
+        buying_power = equity-market_value-cash_held_for_orders
+
+        if not self._starting_cash:
+            self._starting_cash = portfolio_value
+
+        if not self._start_date:
+            self._start_date = datetime.now()
+
+        returns = 0
+        if self._starting_cash and self._starting_cash > 0:
+            returns = (portfolio_value - self._starting_cash) / self._starting_cash
+        long_position_value = 0
+        short_position_value = 0
+        unrealized_pl = 0
+        positions = {}
+
+        # log.info("pos: %s" % pos_infos["results"])
+        if pos_infos and pos_infos["results"]:
+            for result in pos_infos["results"]:
+                amount = int(float(result["quantity"]))
+                if amount == 0:
+                    continue
+
+                instrument = self.trader.get_url_content_json(result["instrument"])
+                symbol = instrument["symbol"]
+                security = self.fetch_and_build_security(symbol, sec_detail=instrument)
+                last_price = iex.get_lastSalePrice(security.symbol) 
+                # self.trader.last_trade_price(security.symbol) -> [['45.6000', '']]
+                if not last_price:
+                    # Lets try again
+                    last_price = iex.get_lastSalePrice(security.symbol)
+
+                created = utc_to_local(datetime.strptime(result["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"))
+                cost_basis = float(result["average_buy_price"])
+                positions[security] = Position(amount, cost_basis, last_price, created)
+
+                # position_value = position_value+(cost_basis*amount)
+                if amount > 0:
+                    unrealized_pl = unrealized_pl + ((last_price * amount) - (cost_basis * amount))
+                    long_position_value = long_position_value + (cost_basis * amount)
+                else:
+                    unrealized_pl = unrealized_pl + ((cost_basis * np.abs([amount])[0]) - (last_price * np.abs([amount])[0]))
+                    short_position_value = long_position_value + (cost_basis * np.abs([amount])[0])
+
+        pnl = equity-uncleared_deposits-yesterday_equity  # unrealized_pl + unsettled_funds
+        leverage = 0
+        net_leverage = 0
+        if portfolio_value > 0:
+            leverage = (long_position_value + short_position_value) / portfolio_value
+            net_leverage = market_value / portfolio_value
+
+        portfolio = Portfolio()
+        portfolio.capital_used = np.abs([(short_position_value - long_position_value)])[0]
+        portfolio.cash = total_cash
+        portfolio.pnl = pnl
+        portfolio.positions = positions
+        portfolio.portfolio_value = portfolio_value
+        portfolio.positions_value = market_value
+        portfolio.returns = returns
+        portfolio.starting_cash = self._starting_cash
+        portfolio.start_date = self._start_date
+
+        self.portfolio = portfolio
+
+        account = Account()
+        # account.accrued_interest=acct_info
+        account.available_funds = portfolio_value
+        account.buying_power = buying_power
+        account.cushion = total_cash / portfolio_value
+        account.day_trades_remaining = float("inf")
+        account.equity_with_loan = portfolio_value
+        account.excess_liquidity = port_info["excess_margin"]
+        account.initial_margin_requirement = float(acct_info["margin_balances"]["margin_limit"]) if "margin_balances" in acct_info and "margin_limit" in acct_info["margin_balances"] else 0
+        account.leverage = leverage
+        account.maintenance_margin_requirement = portfolio_value-float(port_info["excess_margin"])
+        account.net_leverage = net_leverage
+        account.net_liquidation = portfolio_value
+        account.settled_cash = cash
+        account.total_positions_value = market_value
+
+        self.account = account
+
+
+    def fetch_and_build_security(self, symbol, sec_detail=None):
+        if symbol in self._fetched_securities_cache:
+            return self._fetched_securities_cache[symbol]
+
+        if not sec_detail:
+            sec_details = self.rh_session.instruments(symbol)
+            if sec_details and len(sec_details) > 0:
+                for result in sec_details:
+                    if result['symbol'] == symbol:
+                        sec_detail = result
+                        break
+
+        if not sec_detail:
+            return None
+
+        # sec_detail = sec_details[0]
+        symbol = sec_detail['symbol']
+        is_tradeable = sec_detail['tradeable']
+        sec_type = sec_detail['type']
+        simple_name = sec_detail['simple_name']
+
+        min_tick_size = None
+
+        if "min_tick_size" in sec_detail and sec_detail['min_tick_size']:
+            min_tick_size = float(sec_detail['min_tick_size'])
+
+        sec = Security(symbol, simple_name, min_tick_size, is_tradeable, sec_type, sec_detail)
+        self._fetched_securities_cache[symbol] = sec
+        return sec
 
 class ROBINHOODBroker(Broker):
     def __init__(self):
         self.orders = {}
+
+        print("Robinhood Broker intializing...")
 
         self._rh = RHConnection()
         self.currency = 'USD'
 
         self._subscribed_assets = []
 
-        print("Robinhood Broker intializing...")
-
         super(self.__class__, self).__init__()
 
-    # Required - called in algorithm_live.py
     def subscribed_assets(self):
         return self._subscribed_assets
 
-    # Called in get_spot_value()
     def subscribe_to_market_data(self, asset):
         if asset not in self.subscribed_assets():
             # remove str() cast to have a fun debugging journey
@@ -191,77 +399,73 @@ class ROBINHOODBroker(Broker):
             while asset.symbol not in self._rh.bars:
                 sleep(0.1)
 
-    # Not called anywhere ???
     @property
     def positions(self):
         z_positions = zp.Positions()
         for symbol in self._rh.positions:
-            robinhood_position = self._rh.positions[symbol]
+            robinhood_position = self._rh.portfolio.positions[symbol]
             try:
-                z_position = zp.Position(symbol_lookup(symbol))
+                z_position = zp.Position(symbol_lookup(symbol.symbol))
             except SymbolNotFound:
                 # The symbol might not have been ingested to the db therefore
                 # it needs to be skipped.
                 continue
-            z_position.amount = int(robinhood_position.position)
-            z_position.cost_basis = float(robinhood_position.average_cost)
-            z_position.last_sale_price = None
+
+            # Position(amount, cost_basis, last_price, created)
+            z_position.amount = robinhood_position.amount
+            z_position.cost_basis = robinhood_position.cost_basis
+            z_position.last_sale_price = robinhood_position.last_price
             z_position.last_sale_date = None 
             z_positions[symbol_lookup(symbol)] = z_position
 
         return z_positions
 
-    # Required - called in algorithm_live.py
     @property
     def portfolio(self):
         z_portfolio = zp.Portfolio()
-        z_portfolio.capital_used = None
-        z_portfolio.starting_cash = None
-        z_portfolio.portfolio_value = self._rh.trader.portfolios()['equity']
-        z_portfolio.pnl = None
-        z_portfolio.returns = None # pnl / total_at_start
-        z_portfolio.cash = self._rh.trader.get_account()['margin_balances']['unallocated_margin_cash']
-        z_portfolio.start_date = self._rh.trader.portfolios()['start_date']
-        z_portfolio.positions = self.positions()
-        z_portfolio.positions_value = None
+
+        z_portfolio.capital_used = self._rh.portfolio.capital_used
+        z_portfolio.starting_cash = self._rh.portfolio.starting_cash 
+        z_portfolio.portfolio_value = self._rh.portfolio.portfolio_value
+        z_portfolio.pnl = self._rh.portfolio.pnl
+        z_portfolio.returns = self._rh.portfolio.returns
+        z_portfolio.cash = self._rh.portfolio.cash
+        z_portfolio.start_date = self._rh.portfolio.start_date
+        z_portfolio.positions = self._rh.portfolio.positions
+        z_portfolio.positions_value = self._rh.portfolio.positions_value
         z_portfolio.positions_exposure = None
 
         return z_portfolio
 
-    # Required - called in algorithm_live.py
     @property
     def account(self):
-        robinhood_account = self._rh.accounts[self.account_id][self.currency]
-
         z_account = zp.Account()
 
-        z_account.settled_cash = None
+        z_account.settled_cash = self._rh.account.settled_cash
         z_account.accrued_interest = None
-        z_account.buying_power = self._rh.trader.get_account()['margin_balances']['unallocated_margin_cash']
-        z_account.equity_with_loan = self._rh.trader.portfolios()['equity']
-        z_account.total_positions_value = None
+        z_account.buying_power = self._rh.account.buying_power
+        z_account.equity_with_loan = self._rh.account.equity_with_loan
+        z_account.total_positions_value = self._rh.account.total_positions_value
         z_account.total_positions_exposure = None
         z_account.regt_equity = None
         z_account.regt_margin = None
-        z_account.initial_margin_requirement = None
-        z_account.maintenance_margin_requirement = None
-        z_account.available_funds = None
-        z_account.excess_liquidity = None
-        z_account.cushion = None
-        z_account.day_trades_remaining = None
-        z_account.leverage = None
-        z_account.net_leverage = None 
-        z_account.net_liquidation = None
+        z_account.initial_margin_requirement = self._rh.account.initial_margin_requirement
+        z_account.maintenance_margin_requirement = self._rh.account.maintenance_margin_requirement
+        z_account.available_funds = self._rh.account.available_funds
+        z_account.excess_liquidity = self._rh.account.excess_liquidity
+        z_account.cushion = self._rh.account.cushion
+        z_account.day_trades_remaining = self._rh.account.day_trades_remaining
+        z_account.leverage = self._rh.account.leverage
+        z_account.net_leverage = self._rh.account.net_leverage 
+        z_account.net_liquidation = self._rh.account.net_liquidation
 
         return z_account
 
-    # Required - called in algorithm_live.py
     @property
     def time_skew(self):
-        return dt.timedelta(seconds=0)
+        return timedelta(seconds=0)
         # return self._rh.time_skew
 
-    # Required - called in algorithm_live.py
     def order(self, asset, amount, limit_price, stop_price, style):
         is_buy = (amount > 0)
         zp_order = ZPOrder(
@@ -295,7 +499,7 @@ class ROBINHOODBroker(Broker):
 
         for order_id, order in open_orders.items():
             zp_order = ZPOrder(
-                dt=order['dt'],
+                dt=utc_to_local(datetime.strptime(order['dt'], "%Y-%m-%dT%H:%M:%S.%fZ")),
                 asset=symbol_lookup(order['asset']),
                 amount=order['amount'],
                 stop=order['stop_price'],
@@ -304,30 +508,17 @@ class ROBINHOODBroker(Broker):
             zp_order.broker_order_id = order_id
             self.orders[zp_order.id] = zp_order
 
-    # Required - called in algorithm_live.py
     def get_open_orders(self, asset):
-        if asset is None:
-            assets = set([order.asset for order in itervalues(self.orders)
-                          if order.open])
-            return {
-                asset: [order.to_api_obj() for order in itervalues(self.orders)
-                        if order.asset == asset]
-                for asset in assets
-            }
-        return [order.to_api_obj() for order in itervalues(self.orders)
-                if order.asset == asset and order.open]
+        self.update_open_orders()
+        return self.orders
 
-    # Required - called in algorithm_live.py
     def get_order(self, zp_order_id):
         return self.orders[zp_order_id].to_api_obj()
 
-    # Required - called in algorithm_live.py
     def cancel_order(self, zp_order_id):
         robinhood_order_id = self.orders[zp_order_id].broker_order_id
-        
         self._rh.trader.cancel_order(robinhood_order_id)
 
-    # Required - called in data_portal_live.py
     def get_spot_value(self, assets, field, dt, data_frequency):
         symbol = str(assets.symbol)
 
@@ -365,13 +556,11 @@ class ROBINHOODBroker(Broker):
                 elif field == 'volume':
                     return minute_df.last_trade_size.sum()
 
-    # Required - called in data_portal_live.py
     def get_last_traded_dt(self, asset):
         self.subscribe_to_market_data(asset)
 
         return self._rh.bars[asset.symbol].index[-1]
 
-    # Required - called in data_portal_live.py and algorithm_live.py
     def get_realtime_bars(self, assets, frequency):
         if frequency == '1m':
             resample_freq = '1 Min'
