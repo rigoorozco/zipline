@@ -102,15 +102,8 @@ class Security:
         return str(self.__dict__)
 
 
-class Position:
-    def __init__(self, amount=0, cost_basis=0, last_sale_price=0, created=None):
-        self.amount = amount
-        self.cost_basis = cost_basis
-        self.last_sale_price = last_sale_price
-        self.created = created
-
-    def __str__(self):
-        return str(self.__dict__)
+Position = namedtuple('Position', ['security', 'amount', 'cost_basis',
+                                   'last_price', 'created'])
 
 
 class Portfolio:
@@ -248,9 +241,6 @@ class RHConnection():
         pos_infos = self.trader.positions()
         port_info = self.trader.portfolios()
         acct_info = self.trader.get_account()
-        # log.info("pos_infos:%s" % pos_infos)
-        # log.info("account_info:%s" % acct_info)
-        # log.info("port_info:%s" % port_info)
 
         unsettled_funds = float(acct_info["unsettled_funds"])
         market_value = float(port_info["market_value"])
@@ -295,7 +285,12 @@ class RHConnection():
 
                 created = utc_to_local(datetime.strptime(result["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"))
                 cost_basis = float(result["average_buy_price"])
-                positions[security] = Position(amount, cost_basis, last_price, created)
+                
+                positions[security.symbol] = Position(security=security,
+                                                      amount=amount,
+                                                      cost_basis=cost_basis,
+                                                      last_price=last_price,
+                                                      created=created)
 
                 # position_value = position_value+(cost_basis*amount)
                 if amount > 0:
@@ -378,8 +373,6 @@ class ROBINHOODBroker(Broker):
     def __init__(self):
         self.orders = {}
 
-        print("Robinhood Broker intializing...")
-
         self._rh = RHConnection()
         self.currency = 'USD'
 
@@ -402,6 +395,7 @@ class ROBINHOODBroker(Broker):
     @property
     def positions(self):
         z_positions = zp.Positions()
+        # need to call for update
         for symbol in self._rh.positions:
             robinhood_position = self._rh.portfolio.positions[symbol]
             try:
@@ -423,7 +417,7 @@ class ROBINHOODBroker(Broker):
     @property
     def portfolio(self):
         z_portfolio = zp.Portfolio()
-
+        # need to call for update
         z_portfolio.capital_used = self._rh.portfolio.capital_used
         z_portfolio.starting_cash = self._rh.portfolio.starting_cash 
         z_portfolio.portfolio_value = self._rh.portfolio.portfolio_value
@@ -440,7 +434,7 @@ class ROBINHOODBroker(Broker):
     @property
     def account(self):
         z_account = zp.Account()
-
+        # need to call for update
         z_account.settled_cash = self._rh.account.settled_cash
         z_account.accrued_interest = None
         z_account.buying_power = self._rh.account.buying_power
@@ -495,24 +489,42 @@ class ROBINHOODBroker(Broker):
         return zp_order.id
 
     def update_open_orders(self):
+        orders = {}
         open_orders = self._rh.trader.list_open_orders()
+        order_ids = []
 
         for order_id, order in open_orders.items():
             zp_order = ZPOrder(
                 dt=utc_to_local(datetime.strptime(order['dt'], "%Y-%m-%dT%H:%M:%S.%fZ")),
                 asset=symbol_lookup(order['asset']),
-                amount=order['amount'],
-                stop=order['stop_price'],
-                limit=order['limit_price'])
+                amount=int(float(order['amount'])),
+                stop=float(order['stop_price']) if (order['stop_price'] != None) else None,
+                limit=float(order['limit_price']) if (order['limit_price'] != None) else None)
 
             zp_order.broker_order_id = order_id
-            self.orders[zp_order.id] = zp_order
+
+            if order_id not in order_ids:
+                orders[zp_order.id] = zp_order
+                order_ids.append(order_id)
+
+        self.orders = orders
 
     def get_open_orders(self, asset):
         self.update_open_orders()
-        return self.orders
+
+        if asset is None:
+            assets = set([order.asset for order in itervalues(self.orders)
+                          if order.open])
+            return {
+                asset: [order.to_api_obj() for order in itervalues(self.orders)
+                        if order.asset == asset]
+                for asset in assets
+                }
+        return [order.to_api_obj() for order in itervalues(self.orders)
+                if order.asset == asset and order.open]
 
     def get_order(self, zp_order_id):
+        self.update_open_orders()
         return self.orders[zp_order_id].to_api_obj()
 
     def cancel_order(self, zp_order_id):
@@ -554,11 +566,11 @@ class ROBINHOODBroker(Broker):
                 elif field == 'low':
                     return minute_df.last_trade_price.min()
                 elif field == 'volume':
+                    print("volume = %d" % minute_df.last_trade_size.sum())
                     return minute_df.last_trade_size.sum()
 
     def get_last_traded_dt(self, asset):
         self.subscribe_to_market_data(asset)
-
         return self._rh.bars[asset.symbol].index[-1]
 
     def get_realtime_bars(self, assets, frequency):
