@@ -170,7 +170,7 @@ class RHConnection():
        # Connect to Robinhood here
        self.trader = Robinhood()
        self.trader.login_prompt()
-       self.load_profile_info()
+       # self.load_profile_info()
        log.info("Local-Broker Time Skew: {}".format(self.time_skew))
 
     @property
@@ -286,7 +286,7 @@ class RHConnection():
                 created = utc_to_local(datetime.strptime(result["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"))
                 cost_basis = float(result["average_buy_price"])
                 
-                positions[security.symbol] = Position(security=security,
+                positions[symbol_lookup(security.symbol)] = Position(security=security,
                                                       amount=amount,
                                                       cost_basis=cost_basis,
                                                       last_price=last_price,
@@ -399,25 +399,24 @@ class ROBINHOODBroker(Broker):
         for symbol in self._rh.positions:
             robinhood_position = self._rh.portfolio.positions[symbol]
             try:
-                z_position = zp.Position(symbol_lookup(symbol.symbol))
+                z_position = zp.Position(symbol)
             except SymbolNotFound:
                 # The symbol might not have been ingested to the db therefore
                 # it needs to be skipped.
                 continue
 
-            # Position(amount, cost_basis, last_price, created)
             z_position.amount = robinhood_position.amount
             z_position.cost_basis = robinhood_position.cost_basis
             z_position.last_sale_price = robinhood_position.last_price
             z_position.last_sale_date = None 
-            z_positions[symbol_lookup(symbol)] = z_position
+            z_positions[symbol] = z_position
 
         return z_positions
 
     @property
     def portfolio(self):
         z_portfolio = zp.Portfolio()
-        # need to call for update
+        self._rh.load_profile_info()
         z_portfolio.capital_used = self._rh.portfolio.capital_used
         z_portfolio.starting_cash = self._rh.portfolio.starting_cash 
         z_portfolio.portfolio_value = self._rh.portfolio.portfolio_value
@@ -434,7 +433,7 @@ class ROBINHOODBroker(Broker):
     @property
     def account(self):
         z_account = zp.Account()
-        # need to call for update
+        self._rh.load_profile_info()
         z_account.settled_cash = self._rh.account.settled_cash
         z_account.accrued_interest = None
         z_account.buying_power = self._rh.account.buying_power

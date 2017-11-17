@@ -26,7 +26,7 @@ def google_bundle(environ,
            show_progress,
            output_dir):
 
-    symbols = tuple(["SPY", "XIV"])
+    symbols = tuple(["SPY", "XIV", "NAK", "MO", "AMPE", "MU"])
 
     metadata = pd.DataFrame(np.empty(len(symbols), dtype=[
         ('start_date', 'datetime64[ns]'),
@@ -51,7 +51,7 @@ def google_bundle(environ,
                         symbol,
                         'google',
                         '2017-07-31',
-                        '2017-11-13',
+                        '2017-11-15',
                         session=session,
                     ).sort_index()
 
