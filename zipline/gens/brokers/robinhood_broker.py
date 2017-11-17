@@ -68,42 +68,13 @@ def threaded(fn):
 
 
 def utc_to_local(utc_dt):
-    # get integer timestamp to avoid precision lost
     timestamp = calendar.timegm(utc_dt.timetuple())
     local_dt = datetime.fromtimestamp(timestamp)
     assert utc_dt.resolution >= timedelta(microseconds=1)
     return local_dt.replace(microsecond=utc_dt.microsecond)
 
 
-class Security:
-    def __init__(self, symbol, simple_name, min_tick_size=None, is_tradeable=False, security_type=None, security_detail=None):
-        self.symbol = symbol
-        self.simple_name = simple_name
-        self.min_tick_size = min_tick_size
-        self.is_tradeable = is_tradeable
-        self.security_type = security_type
-        self.security_detail = {}  # this the raw hash
-        if security_detail:
-            self.security_detail = security_detail
-
-    def price_convert_up_by_tick_size(self, price):
-        if not self.min_tick_size or self.min_tick_size == 0.0:
-            return price
-
-        return round(np.math.ceil(price / self.min_tick_size) * self.min_tick_size, 7)
-
-    def price_convert_down_by_tick_size(self, price):
-        if not self.min_tick_size or self.min_tick_size == 0.0:
-            return price
-
-        return round(np.math.floor(price / self.min_tick_size) * self.min_tick_size, 7)
-
-    def __str__(self):
-        return str(self.__dict__)
-
-
-Position = namedtuple('Position', ['security', 'amount', 'cost_basis',
-                                   'last_price', 'created'])
+Position = namedtuple('Position', ['amount', 'cost_basis', 'last_price', 'created'])
 
 
 class Portfolio:
@@ -146,7 +117,6 @@ class Account:
 class RHConnection():
     def __init__(self):
         self._next_ticker_id = 0
-        self._next_order_id = None
 
         self.symbol_to_ticker_id = {}
         self.ticker_id_to_symbol = {}
@@ -155,11 +125,9 @@ class RHConnection():
         self.time_skew = None
 
         self.trader = None
-
         self.account = None
         self.portfolio = None
 
-        self._fetched_securities_cache = {}
         self._starting_cash = None
         self._start_date = datetime.now()
 
@@ -167,10 +135,9 @@ class RHConnection():
         self.process_tickers()
 
     def connect(self):
-       # Connect to Robinhood here
        self.trader = Robinhood()
        self.trader.login_prompt()
-       # self.load_profile_info()
+
        log.info("Local-Broker Time Skew: {}".format(self.time_skew))
 
     @property
@@ -178,12 +145,6 @@ class RHConnection():
         ticker_id = self._next_ticker_id
         self._next_ticker_id += 1
         return ticker_id
-
-    @property
-    def next_order_id(self):
-        order_id = self._next_order_id
-        self._next_order_id += 1
-        return order_id
 
     def subscribe_to_market_data(self, symbol):
         if symbol in self.symbol_to_ticker_id:
@@ -237,7 +198,7 @@ class RHConnection():
         else:
             self.bars[symbol] = self.bars[symbol].append(bar)
 
-    def load_profile_info(self):
+    def update_info(self):
         pos_infos = self.trader.positions()
         port_info = self.trader.portfolios()
         acct_info = self.trader.get_account()
@@ -276,18 +237,16 @@ class RHConnection():
 
                 instrument = self.trader.get_url_content_json(result["instrument"])
                 symbol = instrument["symbol"]
-                security = self.fetch_and_build_security(symbol, sec_detail=instrument)
-                last_price = iex.get_lastSalePrice(security.symbol) 
-                # self.trader.last_trade_price(security.symbol) -> [['45.6000', '']]
+                last_price = iex.get_lastSalePrice(symbol) 
+                
                 if not last_price:
                     # Lets try again
-                    last_price = iex.get_lastSalePrice(security.symbol)
+                    last_price = iex.get_lastSalePrice(symbol)
 
                 created = utc_to_local(datetime.strptime(result["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"))
                 cost_basis = float(result["average_buy_price"])
                 
-                positions[symbol_lookup(security.symbol)] = Position(security=security,
-                                                      amount=amount,
+                positions[symbol_lookup(symbol)] = Position(amount=amount,
                                                       cost_basis=cost_basis,
                                                       last_price=last_price,
                                                       created=created)
@@ -339,36 +298,6 @@ class RHConnection():
         self.account = account
 
 
-    def fetch_and_build_security(self, symbol, sec_detail=None):
-        if symbol in self._fetched_securities_cache:
-            return self._fetched_securities_cache[symbol]
-
-        if not sec_detail:
-            sec_details = self.rh_session.instruments(symbol)
-            if sec_details and len(sec_details) > 0:
-                for result in sec_details:
-                    if result['symbol'] == symbol:
-                        sec_detail = result
-                        break
-
-        if not sec_detail:
-            return None
-
-        # sec_detail = sec_details[0]
-        symbol = sec_detail['symbol']
-        is_tradeable = sec_detail['tradeable']
-        sec_type = sec_detail['type']
-        simple_name = sec_detail['simple_name']
-
-        min_tick_size = None
-
-        if "min_tick_size" in sec_detail and sec_detail['min_tick_size']:
-            min_tick_size = float(sec_detail['min_tick_size'])
-
-        sec = Security(symbol, simple_name, min_tick_size, is_tradeable, sec_type, sec_detail)
-        self._fetched_securities_cache[symbol] = sec
-        return sec
-
 class ROBINHOODBroker(Broker):
     def __init__(self):
         self.orders = {}
@@ -385,7 +314,6 @@ class ROBINHOODBroker(Broker):
 
     def subscribe_to_market_data(self, asset):
         if asset not in self.subscribed_assets():
-            # remove str() cast to have a fun debugging journey
             self._rh.subscribe_to_market_data(str(asset.symbol))
             self._subscribed_assets.append(asset)
 
@@ -395,7 +323,7 @@ class ROBINHOODBroker(Broker):
     @property
     def positions(self):
         z_positions = zp.Positions()
-        # need to call for update
+        self._rh.update_info()
         for symbol in self._rh.positions:
             robinhood_position = self._rh.portfolio.positions[symbol]
             try:
@@ -416,7 +344,7 @@ class ROBINHOODBroker(Broker):
     @property
     def portfolio(self):
         z_portfolio = zp.Portfolio()
-        self._rh.load_profile_info()
+        self._rh.update_info()
         z_portfolio.capital_used = self._rh.portfolio.capital_used
         z_portfolio.starting_cash = self._rh.portfolio.starting_cash 
         z_portfolio.portfolio_value = self._rh.portfolio.portfolio_value
@@ -433,7 +361,7 @@ class ROBINHOODBroker(Broker):
     @property
     def account(self):
         z_account = zp.Account()
-        self._rh.load_profile_info()
+        self._rh.update_info()
         z_account.settled_cash = self._rh.account.settled_cash
         z_account.accrued_interest = None
         z_account.buying_power = self._rh.account.buying_power
@@ -490,7 +418,6 @@ class ROBINHOODBroker(Broker):
     def update_open_orders(self):
         orders = {}
         open_orders = self._rh.trader.list_open_orders()
-        order_ids = []
 
         for order_id, order in open_orders.items():
             zp_order = ZPOrder(
@@ -501,10 +428,7 @@ class ROBINHOODBroker(Broker):
                 limit=float(order['limit_price']) if (order['limit_price'] != None) else None)
 
             zp_order.broker_order_id = order_id
-
-            if order_id not in order_ids:
-                orders[zp_order.id] = zp_order
-                order_ids.append(order_id)
+            orders[zp_order.id] = zp_order
 
         self.orders = orders
 
@@ -564,8 +488,7 @@ class ROBINHOODBroker(Broker):
                     return minute_df.last_trade_price.max()
                 elif field == 'low':
                     return minute_df.last_trade_price.min()
-                elif field == 'volume':
-                    print("volume = %d" % minute_df.last_trade_size.sum())
+                elif field == 'total_volume':
                     return minute_df.last_trade_size.sum()
 
     def get_last_traded_dt(self, asset):
