@@ -319,6 +319,7 @@ class ROBINHOODBroker(Broker):
 
         super(self.__class__, self).__init__()
 
+    @property
     def subscribed_assets(self):
         return self._subscribed_assets
 

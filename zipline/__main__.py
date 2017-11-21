@@ -321,8 +321,6 @@ def run(ctx,
         realtime_bar_target=realtime_bar_target
     )
 
-    print("perf finished")
-
     if output == '-':
         click.echo(str(perf))
     elif output != os.devnull:  # make the zipline magic not write any data

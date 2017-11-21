@@ -234,7 +234,7 @@ class LiveTradingAlgorithm(TradingAlgorithm):
             self.realtime_bar_target))
 
         today = str(pd.to_datetime('today').date())
-        subscribed_assets = self.broker.subscribed_assets()
+        subscribed_assets = self.broker.subscribed_assets
         realtime_history = self.broker.get_realtime_bars(subscribed_assets,
                                                          '1m')
 
