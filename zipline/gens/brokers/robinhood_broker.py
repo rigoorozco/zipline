@@ -33,8 +33,8 @@ import zipline.protocol as zp
 from zipline.api import symbol as symbol_lookup
 from zipline.errors import SymbolNotFound
 
-from Robinhood import Robinhood
-from pyEX import api as iex
+from zipline.gens.brokers.rh.robinhood import Robinhood
+from zipline.gens.brokers.rh import iex as iex
 from threading import Thread
 from time import sleep
 import calendar
@@ -301,11 +301,21 @@ class RHConnection():
 class ROBINHOODBroker(Broker):
     def __init__(self):
         self.orders = {}
+        self.last_open_orders = []
 
         self._rh = RHConnection()
         self.currency = 'USD'
 
         self._subscribed_assets = []
+        self._order_init = False
+        self._order_status_map = {"confirmed":          ZP_ORDER_STATUS.OPEN,
+                                  "partially_filled":   ZP_ORDER_STATUS.OPEN,
+                                  "filled":             ZP_ORDER_STATUS.FILLED, 
+                                  "cancelled":          ZP_ORDER_STATUS.CANCELLED, 
+                                  "rejected":           ZP_ORDER_STATUS.REJECTED, 
+                                  "queued":             ZP_ORDER_STATUS.HELD, 
+                                  "unconfirmed":        ZP_ORDER_STATUS.HELD, 
+                                  "failed":             ZP_ORDER_STATUS.REJECTED}
 
         super(self.__class__, self).__init__()
 
@@ -406,7 +416,7 @@ class ROBINHOODBroker(Broker):
         elif isinstance(style, LimitOrder):
             robinhood_order_id = self._rh.trader.place_limit_order(stock_instrument, abs_amount, style.limit_price, transaction)
         elif isinstance(style, StopOrder):
-            robinhood_order_id = self._rh.trader.place_stop_loss_orders(stock_instrument, abs_amount, style.stop_price, transaction)
+            robinhood_order_id = self._rh.trader.place_stop_loss_order(stock_instrument, abs_amount, style.stop_price, transaction)
         elif isinstance(style, StopLimitOrder):
             robinhood_order_id = self._rh.trader.place_stop_limit_order(stock_instrument, abs_amount, style.limit_price, style.stop_price, transaction)
 
@@ -415,15 +425,28 @@ class ROBINHOODBroker(Broker):
 
         return zp_order.id
 
-    def update_open_orders(self):
-        orders = {}
-        open_orders = self._rh.trader.list_open_orders()
+    def update_orders(self):
+        if not self._order_init:
+            self.init_orders()
+            self._order_init = True
 
+        for order_id, zp_order in self.orders.items():
+            details = self._rh.trader.order_details(zp_order.broker_order_id)
+
+            zp_order.filled = int(int(float(details["cumulative_quantity"])))
+            if details["side"] == "sell":
+                zp_order.filled = -zp_order.filled
+            zp_order.commission = float(details["fees"])
+            zp_order.status = self._order_status_map[details["state"]]
+
+    def init_orders(self):
+        open_orders = self._rh.trader.list_open_orders()
+        orders = {}
         for order_id, order in open_orders.items():
             zp_order = ZPOrder(
                 dt=utc_to_local(datetime.strptime(order['dt'], "%Y-%m-%dT%H:%M:%S.%fZ")),
                 asset=symbol_lookup(order['asset']),
-                amount=int(float(order['amount'])),
+                amount=-int(float(order['amount']) if (order['side'] == 'sell') else float(order['amount'])),
                 stop=float(order['stop_price']) if (order['stop_price'] != None) else None,
                 limit=float(order['limit_price']) if (order['limit_price'] != None) else None)
 
@@ -433,7 +456,7 @@ class ROBINHOODBroker(Broker):
         self.orders = orders
 
     def get_open_orders(self, asset):
-        self.update_open_orders()
+        self.update_orders()
 
         if asset is None:
             assets = set([order.asset for order in itervalues(self.orders)
@@ -447,7 +470,7 @@ class ROBINHOODBroker(Broker):
                 if order.asset == asset and order.open]
 
     def get_order(self, zp_order_id):
-        self.update_open_orders()
+        self.update_orders()
         return self.orders[zp_order_id].to_api_obj()
 
     def cancel_order(self, zp_order_id):
