@@ -12,11 +12,9 @@
 # limitations under the License.
 
 import sys
-from collections import namedtuple, defaultdict
+from collections import namedtuple
 from time import sleep
 from math import fabs
-
-from datetime import datetime, timedelta
 
 from six import itervalues
 import pandas as pd
@@ -33,11 +31,11 @@ import zipline.protocol as zp
 from zipline.api import symbol as symbol_lookup
 from zipline.errors import SymbolNotFound
 
-from zipline.gens.brokers.rh.robinhood import Robinhood
-from zipline.gens.brokers.rh import iex as iex
+from Robinhood import Robinhood
+import pyEX as iex
 from threading import Thread
-from time import sleep
 import calendar
+from datetime import datetime, timedelta
 
 from logbook import Logger
 
@@ -135,10 +133,10 @@ class RHConnection():
         self.process_tickers()
 
     def connect(self):
-       self.trader = Robinhood()
-       self.trader.login_prompt()
+        self.trader = Robinhood()
+        self.trader.login_prompt()
 
-       log.info("Local-Broker Time Skew: {}".format(self.time_skew))
+        log.info("Local-Broker Time Skew: {}".format(self.time_skew))
 
     @property
     def next_ticker_id(self):
@@ -167,8 +165,7 @@ class RHConnection():
         try:
             symbol = self.ticker_id_to_symbol[ticker_id]
         except KeyError:
-            log.error("Tick {} for id={} is not registered".format(tick_type,
-                                                                   ticker_id))
+            log.error("Ticker id={} is not registered".format(ticker_id))
             return
 
         last_trade_price = iex.get_lastSalePrice(symbol)
@@ -199,9 +196,9 @@ class RHConnection():
             self.bars[symbol] = self.bars[symbol].append(bar)
 
     def update_info(self):
-        pos_infos = self.trader.positions()
-        port_info = self.trader.portfolios()
-        acct_info = self.trader.get_account()
+        pos_infos = self.trader.positions
+        port_info = self.trader.portfolios
+        acct_info = self.trader.account
 
         unsettled_funds = float(acct_info["unsettled_funds"])
         market_value = float(port_info["market_value"])
@@ -238,18 +235,18 @@ class RHConnection():
                 instrument = self.trader.get_url_content_json(result["instrument"])
                 symbol = instrument["symbol"]
                 last_price = iex.get_lastSalePrice(symbol) 
-                
+
                 if not last_price:
                     # Lets try again
                     last_price = iex.get_lastSalePrice(symbol)
 
                 created = utc_to_local(datetime.strptime(result["created_at"], "%Y-%m-%dT%H:%M:%S.%fZ"))
                 cost_basis = float(result["average_buy_price"])
-                
+
                 positions[symbol_lookup(symbol)] = Position(amount=amount,
-                                                      cost_basis=cost_basis,
-                                                      last_price=last_price,
-                                                      created=created)
+                                                            cost_basis=cost_basis,
+                                                            last_price=last_price,
+                                                            created=created)
 
                 # position_value = position_value+(cost_basis*amount)
                 if amount > 0:
@@ -410,7 +407,7 @@ class ROBINHOODBroker(Broker):
         abs_amount = int(fabs(amount))
         transaction = "buy" if amount > 0 else "sell"
 
-        stock_instrument = self._rh.trader.instruments(str(asset.symbol))[0]
+        stock_instrument = self._rh.trader.instruments(str(asset.symbol))
 
         if isinstance(style, MarketOrder):
             robinhood_order_id = self._rh.trader.place_market_order(stock_instrument, abs_amount, transaction)
@@ -448,8 +445,8 @@ class ROBINHOODBroker(Broker):
                 dt=utc_to_local(datetime.strptime(order['dt'], "%Y-%m-%dT%H:%M:%S.%fZ")),
                 asset=symbol_lookup(order['asset']),
                 amount=-int(float(order['amount']) if (order['side'] == 'sell') else float(order['amount'])),
-                stop=float(order['stop_price']) if (order['stop_price'] != None) else None,
-                limit=float(order['limit_price']) if (order['limit_price'] != None) else None)
+                stop=float(order['stop_price']) if (order['stop_price'] is not None) else None,
+                limit=float(order['limit_price']) if (order['limit_price'] is not None) else None)
 
             zp_order.broker_order_id = order_id
             orders[zp_order.id] = zp_order

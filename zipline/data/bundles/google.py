@@ -1,6 +1,6 @@
 import os
 
-import numpy  as np
+import numpy as np
 import pandas as pd
 from pandas_datareader.data import DataReader
 from pandas_datareader._utils import RemoteDataError
@@ -10,23 +10,25 @@ from zipline.utils.cli import maybe_show_progress
 
 from . import core as bundles
 
+
 def _cachpath(symbol, type_):
     return '-'.join((symbol.replace(os.path.sep, '_'), type_))
 
+
 @bundles.register('google')
 def google_bundle(environ,
-           asset_db_writer,
-           minute_bar_writer,  # unused
-           daily_bar_writer,
-           adjustment_writer,
-           calendar,
-           start_session,
-           end_session,
-           cache,
-           show_progress,
-           output_dir):
+                  asset_db_writer,
+                  minute_bar_writer,  # unused
+                  daily_bar_writer,
+                  adjustment_writer,
+                  calendar,
+                  start_session,
+                  end_session,
+                  cache,
+                  show_progress,
+                  output_dir):
 
-    symbols = tuple(["SPY", "XIV", "NAK", "MO", "AMPE", "MU"])
+    symbols = tuple(["SPY", "XIV", "NAK", "MO", "AMPE", "MU", "ANFI", "CY", "XIN", "AMD", "AUO"])
 
     metadata = pd.DataFrame(np.empty(len(symbols), dtype=[
         ('start_date', 'datetime64[ns]'),
