@@ -1,5 +1,8 @@
 import sys
 import os
+currDir = os.path.dirname(os.path.realpath(__file__))
+rootDir = os.path.abspath(os.path.join(currDir, '../..'))
+sys.path.append(rootDir)
 
 from zipline import __version__ as version
 
